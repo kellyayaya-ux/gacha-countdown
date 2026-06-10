@@ -18,6 +18,11 @@ const legacyStorageKeys = ["gacha-countdown-manual-v1", "gacha-countdown-board-v
 const imageDbName = "gacha-countdown-images-v1";
 const imageStoreName = "images";
 const cloudConfigKey = "gacha-countdown-cloud-config-v1";
+const gunPeers = [
+  "https://relay.peer.ooo/gun",
+  "https://gun-manhattan.herokuapp.com/gun",
+  "https://gunjs.herokuapp.com/gun",
+];
 const phases = [
   { key: "current", label: "当期 UP" },
   { key: "next", label: "下期 UP" },
@@ -62,7 +67,10 @@ let cloudConnected = false;
 let cloudPushTimer = null;
 let applyingRemoteState = false;
 let cloudConfig = { roomId: "" };
-let cloudPollTimer = null;
+let gun = null;
+let gunNode = null;
+let lastCloudUpdatedAt = "";
+let cloudListenRoom = "";
 
 games.forEach((game) => {
   const option = document.createElement("option");
@@ -370,39 +378,61 @@ async function connectCloud() {
     setCloudStatus("请先创建共享房间，或粘贴房间 ID。");
     return;
   }
+  if (!window.Gun) {
+    setCloudStatus("同步脚本没有加载成功。请刷新页面，或检查网络后再试。");
+    return;
+  }
   cloudConnected = true;
-  setCloudStatus("正在连接共享房间...");
-  await pullCloudState();
-  clearInterval(cloudPollTimer);
-  cloudPollTimer = setInterval(pullCloudState, 30000);
-  setCloudStatus(`已连接房间：${cloudConfig.roomId}`);
+  if (!gun) gun = window.Gun({ peers: gunPeers });
+  gunNode = gun.get("gacha-countdown").get(cloudConfig.roomId);
+
+  if (cloudListenRoom !== cloudConfig.roomId) {
+    cloudListenRoom = cloudConfig.roomId;
+    gunNode.get("state").on((remote) => {
+      if (!remote || !remote.payload || applyingRemoteState) return;
+      if (remote.updatedAt && remote.updatedAt === lastCloudUpdatedAt) return;
+      lastCloudUpdatedAt = remote.updatedAt || "";
+      try {
+        applyRemoteState(JSON.parse(remote.payload));
+      } catch (error) {
+        setCloudStatus("云端数据读取失败，请让对方重新上传一次。");
+      }
+    });
+  }
+
+  setCloudStatus(`已连接共享房间：${cloudConfig.roomId}`);
 }
 
 async function pullCloudState() {
-  if (!cloudConfig.roomId || applyingRemoteState) return;
-  try {
-    const response = await fetch(blobApiUrl(cloudConfig.roomId), { cache: "no-store" });
-    if (!response.ok) throw new Error(`读取返回 ${response.status}`);
-    const remote = await response.json();
-    if (remote?.data) applyRemoteState(remote.data);
-  } catch (error) {
-    setCloudStatus(`读取失败：${error.message || "共享房间不可用"}`);
-  }
+  if (!cloudConnected) await connectCloud();
+  setCloudStatus("已连接。云端有更新时会自动拉取。");
 }
 
 async function pushCloudState(message = "已同步") {
   if (!cloudConnected || !cloudConfig.roomId || applyingRemoteState) return;
+  if (!gunNode) {
+    await connectCloud();
+    if (!gunNode) return;
+  }
   try {
     const snapshot = await createCloudSnapshot();
-    const response = await fetch(blobApiUrl(cloudConfig.roomId), {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ data: snapshot, updatedAt: new Date().toISOString() }),
-    });
-    if (!response.ok) throw new Error(`上传返回 ${response.status}`);
-    setCloudStatus(message);
+    const updatedAt = new Date().toISOString();
+    lastCloudUpdatedAt = updatedAt;
+    gunNode.get("state").put(
+      {
+        payload: JSON.stringify(snapshot),
+        updatedAt,
+      },
+      (ack) => {
+        if (ack?.err) {
+          setCloudStatus("同步失败：公共同步节点暂时不可用，稍后再试。");
+          return;
+        }
+        setCloudStatus(message);
+      },
+    );
   } catch (error) {
-    setCloudStatus(`同步失败：${error.message || "未知错误"}`);
+    setCloudStatus(`同步失败：${error.message || "图片可能太大，请稍后再试"}`);
   }
 }
 
@@ -415,26 +445,16 @@ function scheduleCloudPush() {
 async function createSharedRoom() {
   try {
     setCloudStatus("正在创建共享房间...");
-    const snapshot = await createCloudSnapshot();
-    const response = await fetch("https://jsonblob.com/api/jsonBlob", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ data: snapshot, updatedAt: new Date().toISOString() }),
-    });
-    if (!response.ok) throw new Error(`创建返回 ${response.status}`);
-    const location = response.headers.get("Location") || "";
-    const id = location.split("/").filter(Boolean).pop();
-    if (!id) throw new Error("没有拿到房间 ID");
+    const id = `gacha-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     roomId.value = id;
     saveCloudConfig();
-    cloudConnected = true;
     shareLink.value = buildShareUrl(id);
-    setCloudStatus("共享房间已创建，复制链接发给朋友即可。");
+    await connectCloud();
+    await pushCloudState("共享房间已创建，复制链接发给朋友即可。");
   } catch (error) {
-    setCloudStatus(`创建失败：${error.message || "网络不可用"}`);
+    setCloudStatus(`创建失败：${error.message || "公共同步节点暂时不可用"}`);
   }
 }
-
 function copyShareUrl() {
   const value = shareLink.value;
   if (!value) return;
@@ -442,9 +462,6 @@ function copyShareUrl() {
   setCloudStatus("分享链接已复制。");
 }
 
-function blobApiUrl(id) {
-  return `https://jsonblob.com/api/jsonBlob/${encodeURIComponent(id)}`;
-}
 
 function buildShareUrl(id) {
   const base = window.location.href.split("?")[0];
