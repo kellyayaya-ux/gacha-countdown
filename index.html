@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>卡池倒计时</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="topbar">
+        <div>
+          <p class="kicker">Gacha Timer</p>
+          <h1>卡池倒计时看板</h1>
+        </div>
+        <p id="todayLabel">按系统时间计算</p>
+      </header>
+
+      <section class="layout">
+        <aside class="game-panel">
+          <div class="panel-title">
+            <p class="kicker">Games</p>
+            <h2>全部游戏</h2>
+          </div>
+          <div class="game-board" id="gameBoard"></div>
+          <div class="game-editor">
+            <input id="newGameName" type="text" placeholder="新增游戏名" />
+            <button id="addGameButton" type="button">新增</button>
+          </div>
+        </aside>
+
+        <section class="detail-panel">
+          <header class="detail-head">
+            <div>
+              <p id="phaseLabel">当前游戏</p>
+              <h2 id="selectedGameTitle">原神</h2>
+            </div>
+            <div class="detail-actions">
+              <button class="logo-drop paste-target" id="logoDrop" type="button" data-logo="true">
+                <span>粘贴 Logo</span>
+              </button>
+              <select id="gameSelect" aria-label="选择游戏"></select>
+            </div>
+          </header>
+
+          <section class="cloud-panel">
+            <details>
+              <summary>在线同步</summary>
+              <div class="cloud-grid">
+                <label>
+                  <span>共享房间 ID</span>
+                  <input id="roomId" type="text" placeholder="创建后自动生成" />
+                </label>
+                <label>
+                  <span>分享链接</span>
+                  <input id="shareLink" type="text" readonly placeholder="创建房间后复制给朋友" />
+                </label>
+                <div class="cloud-actions">
+                  <button id="createRoomButton" type="button">创建共享房间</button>
+                  <button class="ghost-button" id="connectCloudButton" type="button">连接/拉取</button>
+                  <button class="ghost-button" id="pushCloudButton" type="button">上传本机数据</button>
+                  <button class="ghost-button" id="copyShareButton" type="button">复制链接</button>
+                </div>
+              </div>
+              <p id="cloudStatus">未连接。创建房间后，把分享链接发给朋友即可同步。</p>
+            </details>
+          </section>
+
+          <section class="cloud-panel">
+            <details>
+              <summary>自动更新</summary>
+              <div class="cloud-grid">
+                <label>
+                  <span>公告/资讯页链接</span>
+                  <input id="autoSourceUrl" type="url" placeholder="保存一个该游戏的公告页" />
+                </label>
+                <label>
+                  <span>临时单篇公告链接</span>
+                  <input id="tempArticleUrl" type="url" placeholder="临时粘贴单篇公告链接" />
+                </label>
+                <div class="cloud-actions">
+                  <button id="checkUpdateButton" type="button">立即检查</button>
+                  <button class="ghost-button" id="saveSourceButton" type="button">保存来源</button>
+                </div>
+              </div>
+              <p id="autoUpdateStatus">尚未检查。</p>
+            </details>
+          </section>
+
+          <section class="pending-panel" id="pendingPanel"></section>
+
+          <section class="selected-game-editor">
+            <label>
+              <span>当前游戏名称</span>
+              <input id="renameGameInput" type="text" />
+            </label>
+            <button class="ghost-button" id="renameGameButton" type="button">改名</button>
+            <button class="ghost-button danger-button" id="deleteGameButton" type="button">删除游戏</button>
+          </section>
+
+          <section class="hero">
+            <div class="hero-info">
+              <p id="eventTitle">等待卡池信息</p>
+              <div class="countdown" id="mainCountdown">--</div>
+              <p id="dateRange">填写当期或下期 UP 后自动计算倒计时。</p>
+            </div>
+            <button class="hero-image paste-target" id="heroImage" type="button" data-slot="current">
+              <span>点击后直接粘贴图片</span>
+            </button>
+          </section>
+
+          <section class="pool-grid" id="poolGrid"></section>
+        </section>
+      </section>
+    </main>
+
+    <template id="poolTemplate">
+      <article class="pool-card">
+        <div class="pool-card-head">
+          <div>
+            <p class="kicker" data-role="phase"></p>
+            <h3 data-role="title"></h3>
+          </div>
+          <button class="ghost-button" data-action="clear" type="button">清空</button>
+        </div>
+
+        <button class="image-drop paste-target" data-role="image" type="button">
+          <span>点击后 Ctrl+V 粘贴图片</span>
+        </button>
+
+        <label>
+          <span>卡池名字</span>
+          <input data-field="name" type="text" placeholder="例如 长离角色活动唤取" />
+        </label>
+
+        <div class="time-input-grid">
+          <label>
+            <span>开始时间</span>
+            <input data-field="startText" type="text" placeholder="例如 6月10日下午6点" />
+          </label>
+          <label>
+            <span>结束时间</span>
+            <input data-field="endText" type="text" placeholder="例如 6月30日下午3点" />
+          </label>
+        </div>
+        <p class="range-preview" data-role="rangePreview"></p>
+      </article>
+    </template>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
