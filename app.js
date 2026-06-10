@@ -524,7 +524,7 @@ async function createSupabaseSnapshot() {
       if (!pool) continue;
       let image = pool.image || "";
       if (!image && pool.imageKey) image = await imageDbGet(pool.imageKey).catch(() => "");
-      if (image?.startsWith("data:")) image = await uploadCloudImage(image, `${game}/${key}`);
+      if (image?.startsWith("data:")) image = await uploadCloudImage(image, imagePathPrefix(game, key));
       pool.image = image || "";
       pool.imageKey = "";
     }
@@ -532,7 +532,7 @@ async function createSupabaseSnapshot() {
     if (logo && !logo.startsWith("data:") && !logo.startsWith("assets/") && !isRemoteImage(logo)) {
       logo = await imageDbGet(logo).catch(() => logo);
     }
-    if (logo?.startsWith("data:")) logo = await uploadCloudImage(logo, `${game}/logo`);
+    if (logo?.startsWith("data:")) logo = await uploadCloudImage(logo, imagePathPrefix(game, "logo"));
     snapshot.logos[game] = logo;
   }
   return snapshot;
@@ -542,7 +542,7 @@ async function uploadCloudImage(dataUrl, pathPrefix) {
   const client = getSupabaseClient();
   const blob = dataUrlToBlob(dataUrl);
   const extension = blob.type.includes("jpeg") ? "jpg" : blob.type.includes("webp") ? "webp" : "png";
-  const safePrefix = encodeURIComponent(pathPrefix).replace(/%2F/g, "/");
+  const safePrefix = String(pathPrefix).replace(/[^a-z0-9/_-]/gi, "-");
   const path = `${cloudConfig.roomId}/${safePrefix}-${Date.now()}-${Math.random().toString(36).slice(2)}.${extension}`;
   const { error } = await client.storage.from(supabaseImageBucket).upload(path, blob, {
     cacheControl: "31536000",
@@ -552,6 +552,11 @@ async function uploadCloudImage(dataUrl, pathPrefix) {
   if (error) throw error;
   const { data } = client.storage.from(supabaseImageBucket).getPublicUrl(path);
   return data.publicUrl;
+}
+
+function imagePathPrefix(game, slot) {
+  const gameIndex = Math.max(0, state.games.indexOf(game));
+  return `game-${gameIndex}/${slot}`;
 }
 
 function dataUrlToBlob(dataUrl) {
