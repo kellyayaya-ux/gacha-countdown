@@ -18,11 +18,9 @@ const legacyStorageKeys = ["gacha-countdown-manual-v1", "gacha-countdown-board-v
 const imageDbName = "gacha-countdown-images-v1";
 const imageStoreName = "images";
 const cloudConfigKey = "gacha-countdown-cloud-config-v1";
-const gunPeers = [
-  "https://relay.peer.ooo/gun",
-  "https://gun-manhattan.herokuapp.com/gun",
-  "https://gunjs.herokuapp.com/gun",
-];
+const supabaseUrl = "https://scayfogjajkyruiyyzku.supabase.co";
+const supabaseKey = "sb_publishable_sYTOwlEQ1WufVHZ46E6txw_8gTV9tuz";
+const supabaseImageBucket = "gacha-images";
 const phases = [
   { key: "current", label: "当期 UP" },
   { key: "next", label: "下期 UP" },
@@ -70,10 +68,9 @@ let cloudConnected = false;
 let cloudPushTimer = null;
 let applyingRemoteState = false;
 let cloudConfig = { roomId: "" };
-let gun = null;
-let gunNode = null;
+let supabaseClient = null;
 let lastCloudUpdatedAt = "";
-let cloudListenRoom = "";
+let cloudPullTimer = null;
 
 games.forEach((game) => {
   const option = document.createElement("option");
@@ -406,66 +403,69 @@ function connectCloudFromInputs() {
   connectCloud();
 }
 
+function getSupabaseClient() {
+  if (!window.supabase?.createClient) throw new Error("Supabase 脚本没有加载成功，请刷新页面。");
+  if (!supabaseClient) supabaseClient = window.supabase.createClient(supabaseUrl, supabaseKey);
+  return supabaseClient;
+}
+
 async function connectCloud() {
   if (!cloudConfig.roomId) {
     setCloudStatus("请先创建共享房间，或粘贴房间 ID。");
     return;
   }
-  if (!window.Gun) {
-    setCloudStatus("同步脚本没有加载成功。请刷新页面，或检查网络后再试。");
-    return;
+  try {
+    const client = getSupabaseClient();
+    cloudConnected = true;
+    setCloudStatus("正在连接云端房间...");
+    const { data, error } = await client.from("gacha_rooms").select("data, updated_at").eq("id", cloudConfig.roomId).maybeSingle();
+    if (error) throw error;
+    if (data?.data) {
+      lastCloudUpdatedAt = data.updated_at || "";
+      applyRemoteState(data.data);
+    } else {
+      await pushCloudState("共享房间已创建，复制链接发给朋友即可");
+    }
+    clearInterval(cloudPullTimer);
+    cloudPullTimer = setInterval(pullCloudState, 5000);
+    setCloudStatus(`已连接共享房间：${cloudConfig.roomId}`);
+  } catch (error) {
+    cloudConnected = false;
+    setCloudStatus(`连接失败：${error.message || "请确认 Supabase 初始化 SQL 已运行"}`);
   }
-  cloudConnected = true;
-  if (!gun) gun = window.Gun({ peers: gunPeers });
-  gunNode = gun.get("gacha-countdown").get(cloudConfig.roomId);
-
-  if (cloudListenRoom !== cloudConfig.roomId) {
-    cloudListenRoom = cloudConfig.roomId;
-    gunNode.get("state").on((remote) => {
-      if (!remote || !remote.payload || applyingRemoteState) return;
-      if (remote.updatedAt && remote.updatedAt === lastCloudUpdatedAt) return;
-      lastCloudUpdatedAt = remote.updatedAt || "";
-      try {
-        applyRemoteState(JSON.parse(remote.payload));
-      } catch (error) {
-        setCloudStatus("云端数据读取失败，请让对方重新上传一次。");
-      }
-    });
-  }
-
-  setCloudStatus(`已连接共享房间：${cloudConfig.roomId}`);
 }
 
 async function pullCloudState() {
-  if (!cloudConnected) await connectCloud();
-  setCloudStatus("已连接。云端有更新时会自动拉取。");
+  if (!cloudConnected || !cloudConfig.roomId || applyingRemoteState) return;
+  try {
+    const client = getSupabaseClient();
+    const { data, error } = await client.from("gacha_rooms").select("data, updated_at").eq("id", cloudConfig.roomId).maybeSingle();
+    if (error) throw error;
+    if (!data?.data || data.updated_at === lastCloudUpdatedAt) return;
+    lastCloudUpdatedAt = data.updated_at || "";
+    applyRemoteState(data.data);
+  } catch (error) {
+    setCloudStatus(`拉取失败：${error.message || "云端暂时不可用"}`);
+  }
 }
 
 async function pushCloudState(message = "已同步") {
   if (!cloudConnected || !cloudConfig.roomId || applyingRemoteState) return;
-  if (!gunNode) {
-    await connectCloud();
-    if (!gunNode) return;
-  }
   try {
-    const snapshot = createCloudSyncSnapshot();
+    const client = getSupabaseClient();
+    setCloudStatus("正在上传到云端...");
+    const snapshot = await createSupabaseSnapshot();
     const updatedAt = new Date().toISOString();
+    const { error } = await client.from("gacha_rooms").upsert({
+      id: cloudConfig.roomId,
+      data: snapshot,
+      updated_at: updatedAt,
+    });
+    if (error) throw error;
     lastCloudUpdatedAt = updatedAt;
-    gunNode.get("state").put(
-      {
-        payload: JSON.stringify(snapshot),
-        updatedAt,
-      },
-      (ack) => {
-        if (ack?.err) {
-          setCloudStatus("同步失败：公共同步节点暂时不可用，稍后再试。");
-          return;
-        }
-        setCloudStatus(message);
-      },
-    );
+    setCloudStatus(`${message}：图片、文字和时间已保存到云端。`);
   } catch (error) {
-    setCloudStatus(`同步失败：${error.message || "图片可能太大，请稍后再试"}`);
+    setCloudStatus(`同步失败：${error.message || "请确认 Supabase 初始化 SQL 已运行"}`);
   }
 }
 
@@ -482,20 +482,22 @@ async function createSharedRoom() {
     roomId.value = id;
     saveCloudConfig();
     shareLink.value = buildShareUrl(id);
-    await connectCloud();
-    await pushCloudState("共享房间已创建，复制链接发给朋友即可。");
+    cloudConnected = true;
+    await pushCloudState("共享房间已创建，复制链接发给朋友即可");
+    clearInterval(cloudPullTimer);
+    cloudPullTimer = setInterval(pullCloudState, 5000);
   } catch (error) {
-    setCloudStatus(`创建失败：${error.message || "公共同步节点暂时不可用"}`);
+    cloudConnected = false;
+    setCloudStatus(`创建失败：${error.message || "请确认 Supabase 初始化 SQL 已运行"}`);
   }
 }
+
 function copyShareUrl() {
   const value = shareLink.value;
   if (!value) return;
   navigator.clipboard?.writeText(value);
   setCloudStatus("分享链接已复制。");
 }
-
-
 function buildShareUrl(id) {
   const base = window.location.href.split("?")[0];
   return `${base}?room=${encodeURIComponent(id)}`;
@@ -512,6 +514,57 @@ async function createCloudSnapshot() {
     if (logo && !logo.startsWith("data:") && !logo.startsWith("assets/")) snapshot.logos[game] = await imageDbGet(logo).catch(() => logo);
   }
   return snapshot;
+}
+
+async function createSupabaseSnapshot() {
+  const snapshot = JSON.parse(JSON.stringify(state));
+  for (const game of snapshot.games) {
+    for (const { key } of phases) {
+      const pool = snapshot.byGame[game]?.[key];
+      if (!pool) continue;
+      let image = pool.image || "";
+      if (!image && pool.imageKey) image = await imageDbGet(pool.imageKey).catch(() => "");
+      if (image?.startsWith("data:")) image = await uploadCloudImage(image, `${game}/${key}`);
+      pool.image = image || "";
+      pool.imageKey = "";
+    }
+    let logo = snapshot.logos[game] || "";
+    if (logo && !logo.startsWith("data:") && !logo.startsWith("assets/") && !isRemoteImage(logo)) {
+      logo = await imageDbGet(logo).catch(() => logo);
+    }
+    if (logo?.startsWith("data:")) logo = await uploadCloudImage(logo, `${game}/logo`);
+    snapshot.logos[game] = logo;
+  }
+  return snapshot;
+}
+
+async function uploadCloudImage(dataUrl, pathPrefix) {
+  const client = getSupabaseClient();
+  const blob = dataUrlToBlob(dataUrl);
+  const extension = blob.type.includes("jpeg") ? "jpg" : blob.type.includes("webp") ? "webp" : "png";
+  const safePrefix = encodeURIComponent(pathPrefix).replace(/%2F/g, "/");
+  const path = `${cloudConfig.roomId}/${safePrefix}-${Date.now()}-${Math.random().toString(36).slice(2)}.${extension}`;
+  const { error } = await client.storage.from(supabaseImageBucket).upload(path, blob, {
+    cacheControl: "31536000",
+    upsert: true,
+    contentType: blob.type || "image/png",
+  });
+  if (error) throw error;
+  const { data } = client.storage.from(supabaseImageBucket).getPublicUrl(path);
+  return data.publicUrl;
+}
+
+function dataUrlToBlob(dataUrl) {
+  const [header, body] = dataUrl.split(",");
+  const mime = header.match(/data:([^;]+)/)?.[1] || "image/png";
+  const binary = atob(body);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return new Blob([bytes], { type: mime });
+}
+
+function isRemoteImage(value) {
+  return /^https?:\/\//.test(value || "");
 }
 
 function createCloudSyncSnapshot() {
@@ -1223,7 +1276,7 @@ function renderLogoDrop() {
     logoDrop.innerHTML = "<span>粘贴 Logo</span>";
     return;
   }
-  if (logo.startsWith("data:") || logo.startsWith("assets/")) {
+  if (logo.startsWith("data:") || logo.startsWith("assets/") || isRemoteImage(logo)) {
     logoDrop.innerHTML = `<img src="${escapeHtml(logo)}" alt="${escapeHtml(state.game)} Logo" onerror="this.replaceWith(document.createTextNode('Logo'))" />`;
     return;
   }
@@ -1243,7 +1296,7 @@ function getGameLogo(game) {
 
 function renderLogoMarkup(game, logo) {
   if (!logo) return escapeHtml(game.slice(0, 1));
-  if (logo.startsWith("data:") || logo.startsWith("assets/")) {
+  if (logo.startsWith("data:") || logo.startsWith("assets/") || isRemoteImage(logo)) {
     return `<img src="${escapeHtml(logo)}" alt="${escapeHtml(game)}" onerror="this.replaceWith(document.createTextNode('${escapeHtml(game.slice(0, 1))}'))" />`;
   }
   return escapeHtml(game.slice(0, 1));
@@ -1253,7 +1306,7 @@ function hydrateGameLogos() {
   gameBoard.querySelectorAll("[data-logo-game]").forEach((node) => {
     const game = node.dataset.logoGame;
     const logo = getGameLogo(game);
-    if (!logo || logo.startsWith("data:") || logo.startsWith("assets/")) return;
+    if (!logo || logo.startsWith("data:") || logo.startsWith("assets/") || isRemoteImage(logo)) return;
     imageDbGet(logo)
       .then((image) => {
         if (image) node.innerHTML = `<img src="${escapeHtml(image)}" alt="${escapeHtml(game)}" />`;
