@@ -331,9 +331,27 @@ button {
 
 .pool-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   margin-top: 12px;
+}
+
+.pool-phase-group {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.pool-phase-title {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pool-phase-title h3 {
+  margin: 0;
+  font-size: 18px;
 }
 
 .pool-card {
@@ -358,6 +376,48 @@ button {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
+}
+
+.date-parts {
+  display: grid;
+  gap: 8px;
+}
+
+.date-parts-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.tbd-toggle {
+  display: inline-flex !important;
+  grid-auto-flow: column;
+  align-items: center;
+  gap: 5px !important;
+  white-space: nowrap;
+}
+
+.date-part-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.date-part-grid label {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.date-part-grid input[type="number"] {
+  width: 100%;
+  min-width: 0;
+  padding: 9px 6px;
+  text-align: center;
 }
 
 .range-preview {
@@ -486,6 +546,7 @@ button {
   .layout,
   .hero,
   .pool-grid,
+  .pool-phase-group,
   .cloud-grid,
   .selected-game-editor,
   .pending-card {

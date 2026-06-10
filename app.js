@@ -178,9 +178,9 @@ async function initImages() {
   games.forEach((game) => {
     const data = state.byGame[game];
     phases.forEach(({ key }) => {
-      const pool = data[key];
+      getPhasePools(data, key).forEach((pool, index) => {
       if (pool.image && pool.image.startsWith("data:")) {
-        const imageKey = makeImageKey(game, key);
+        const imageKey = makeImageKey(game, `${key}:${index}`);
         migrations.push(
           imageDbSet(imageKey, pool.image).then(() => {
             pool.imageKey = imageKey;
@@ -188,6 +188,7 @@ async function initImages() {
           }),
         );
       }
+      });
     });
     if (state.logos[game] && state.logos[game].startsWith("data:")) {
       const logoKey = makeLogoKey(game);
@@ -293,11 +294,18 @@ function normalizeState(input) {
     if (!nextState.pendingUpdates[game]) nextState.pendingUpdates[game] = [];
     if (!nextState.ignoredUpdates[game]) nextState.ignoredUpdates[game] = [];
     if (!nextState.autoUpdate[game]) nextState.autoUpdate[game] = { sourceUrl: "", tempUrl: "", lastChecked: "", status: "" };
+    if (!Array.isArray(nextState.byGame[game].currentExtra)) nextState.byGame[game].currentExtra = [];
+    if (!Array.isArray(nextState.byGame[game].nextExtra)) nextState.byGame[game].nextExtra = [];
     phases.forEach(({ key }) => {
       nextState.byGame[game][key] = {
         ...createPool(key),
         ...(nextState.byGame[game][key] || {}),
       };
+      normalizePool(nextState.byGame[game][key], key);
+    });
+    nextState.byGame[game].currentExtra = nextState.byGame[game].currentExtra.map((pool) => normalizePool({ ...createPool("current"), ...pool }, "current"));
+    nextState.byGame[game].nextExtra = nextState.byGame[game].nextExtra.map((pool) => normalizePool({ ...createPool("next"), ...pool }, "next"));
+    phases.forEach(({ key }) => {
       nextState.byGame[game][key].rangeText =
         nextState.byGame[game][key].rangeText || formatRangeText(nextState.byGame[game][key]);
       nextState.byGame[game][key].startText =
@@ -309,6 +317,13 @@ function normalizeState(input) {
   return nextState;
 }
 
+function normalizePool(pool, phase) {
+  pool.phase = phase;
+  pool.startTbd = Boolean(pool.startTbd);
+  pool.endTbd = Boolean(pool.endTbd);
+  return pool;
+}
+
 function isKnownPoolGroup(value) {
   return value && typeof value === "object" && (value.current || value.next);
 }
@@ -317,6 +332,8 @@ function createGameData() {
   return {
     current: createPool("current"),
     next: createPool("next"),
+    currentExtra: [],
+    nextExtra: [],
   };
 }
 
@@ -334,6 +351,8 @@ function createPool(phase) {
     rangeText: "",
     startText: "",
     endText: "",
+    startTbd: false,
+    endTbd: false,
     image: "",
     imageKey: "",
   };
@@ -370,9 +389,10 @@ function createStorageSnapshot(source = state, stripInlineImages = false) {
   const snapshot = JSON.parse(JSON.stringify(source));
   snapshot.games.forEach((game) => {
     phases.forEach(({ key }) => {
-      const pool = snapshot.byGame[game]?.[key];
+      getPhasePools(snapshot.byGame[game], key).forEach((pool) => {
       if (!pool) return;
       if (pool.imageKey || stripInlineImages) pool.image = "";
+      });
     });
     if (stripInlineImages && snapshot.logos[game]?.startsWith("data:")) snapshot.logos[game] = "";
   });
@@ -420,7 +440,7 @@ async function connectCloud() {
     setCloudStatus("正在连接云端房间...");
     const { data, error } = await client.from("gacha_rooms").select("data, updated_at").eq("id", cloudConfig.roomId).maybeSingle();
     if (error) throw error;
-    if (data?.data) {
+    if (data?.data?.games) {
       lastCloudUpdatedAt = data.updated_at || "";
       applyRemoteState(data.data);
     } else {
@@ -482,16 +502,22 @@ async function createSharedRoom() {
     roomId.value = id;
     saveCloudConfig();
     shareLink.value = buildShareUrl(id);
+    const client = getSupabaseClient();
+    const { error } = await client.from("gacha_rooms").upsert({
+      id,
+      data: {},
+      updated_at: new Date().toISOString(),
+    });
+    if (error) throw error;
     cloudConnected = true;
-    await pushCloudState("共享房间已创建，复制链接发给朋友即可");
     clearInterval(cloudPullTimer);
     cloudPullTimer = setInterval(pullCloudState, 5000);
+    setCloudStatus("共享房间已创建。整理好卡池后，再点“上传本机数据”。");
   } catch (error) {
     cloudConnected = false;
     setCloudStatus(`创建失败：${error.message || "请确认 Supabase 初始化 SQL 已运行"}`);
   }
 }
-
 function copyShareUrl() {
   const value = shareLink.value;
   if (!value) return;
@@ -507,8 +533,9 @@ async function createCloudSnapshot() {
   const snapshot = JSON.parse(JSON.stringify(state));
   for (const game of snapshot.games) {
     for (const { key } of phases) {
-      const pool = snapshot.byGame[game]?.[key];
-      if (pool?.imageKey && !pool.image) pool.image = await imageDbGet(pool.imageKey).catch(() => "");
+      for (const pool of getPhasePools(snapshot.byGame[game], key)) {
+        if (pool?.imageKey && !pool.image) pool.image = await imageDbGet(pool.imageKey).catch(() => "");
+      }
     }
     const logo = snapshot.logos[game];
     if (logo && !logo.startsWith("data:") && !logo.startsWith("assets/")) snapshot.logos[game] = await imageDbGet(logo).catch(() => logo);
@@ -520,13 +547,15 @@ async function createSupabaseSnapshot() {
   const snapshot = JSON.parse(JSON.stringify(state));
   for (const game of snapshot.games) {
     for (const { key } of phases) {
-      const pool = snapshot.byGame[game]?.[key];
-      if (!pool) continue;
-      let image = pool.image || "";
-      if (!image && pool.imageKey) image = await imageDbGet(pool.imageKey).catch(() => "");
-      if (image?.startsWith("data:")) image = await uploadCloudImage(image, imagePathPrefix(game, key));
-      pool.image = image || "";
-      pool.imageKey = "";
+      const pools = getPhasePools(snapshot.byGame[game], key);
+      for (const [index, pool] of pools.entries()) {
+        if (!pool) continue;
+        let image = pool.image || "";
+        if (!image && pool.imageKey) image = await imageDbGet(pool.imageKey).catch(() => "");
+        if (image?.startsWith("data:")) image = await uploadCloudImage(image, imagePathPrefix(game, `${key}-${index}`));
+        pool.image = image || "";
+        pool.imageKey = "";
+      }
     }
     let logo = snapshot.logos[game] || "";
     if (logo && !logo.startsWith("data:") && !logo.startsWith("assets/") && !isRemoteImage(logo)) {
@@ -576,10 +605,11 @@ function createCloudSyncSnapshot() {
   const snapshot = createStorageSnapshot();
   snapshot.games.forEach((game) => {
     phases.forEach(({ key }) => {
-      const pool = snapshot.byGame[game]?.[key];
-      if (!pool) return;
-      pool.image = "";
-      pool.imageKey = "";
+      getPhasePools(snapshot.byGame[game], key).forEach((pool) => {
+        if (!pool) return;
+        pool.image = "";
+        pool.imageKey = "";
+      });
     });
     const logo = snapshot.logos[game];
     if (logo && !logo.startsWith("assets/")) snapshot.logos[game] = defaultLogos[game] || "";
@@ -672,22 +702,32 @@ function promoteAllGames() {
 
 function promoteGame(game) {
   const data = state.byGame[game];
-  const current = data.current;
-  const next = data.next;
-  const now = Date.now();
-  const nextStart = partsToDate(next.start).getTime();
+  const nextPools = getPhasePools(data, "next");
+  const promotable = nextPools.filter((pool) => isFilled(pool) && !pool.startTbd && partsToDate(pool.start).getTime() <= Date.now());
+  if (!promotable.length && (isFilled(data.current) || !nextPools.some(isFilled))) return;
+  if (!promotable.length && !isFilled(data.current) && nextPools.some(isFilled)) promotable.push(...nextPools.filter(isFilled));
+  if (!promotable.length) return;
+  data.current = { ...promotable[0], phase: "current" };
+  data.currentExtra = promotable.slice(1).map((pool) => ({ ...pool, phase: "current" }));
+  data.next = createPool("next");
+  data.nextExtra = [];
+}
 
-  if (isFilled(next) && nextStart <= now) {
-    data.current = { ...next, phase: "current" };
-    data.next = createPool("next");
-  } else if (!isFilled(current) && isFilled(next)) {
-    data.current = { ...next, phase: "current" };
-    data.next = createPool("next");
-  }
+function getPhasePools(data, phase) {
+  const base = data?.[phase] ? [data[phase]] : [];
+  const extra = Array.isArray(data?.[`${phase}Extra`]) ? data[`${phase}Extra`] : [];
+  return [...base, ...extra];
+}
+
+function getPoolRef(game, phase, index) {
+  const data = state.byGame[game];
+  if (Number(index) === 0) return data[phase];
+  const list = data[`${phase}Extra`];
+  return list[Number(index) - 1];
 }
 
 function isFilled(pool) {
-  return Boolean(pool.name || pool.image || pool.imageKey);
+  return Boolean(pool?.name || pool?.image || pool?.imageKey);
 }
 
 function addGame() {
@@ -695,14 +735,13 @@ function addGame() {
   if (!name || state.games.includes(name)) return;
   state.games.push(name);
   state.byGame[name] = createGameData();
-  state.logos[name] = state.logos[name] || "";
+  state.logos[name] = "";
   state.autoUpdate[name] = { sourceUrl: "", tempUrl: "", lastChecked: "", status: "" };
   state.pendingUpdates[name] = [];
   state.ignoredUpdates[name] = [];
   state.game = name;
   newGameName.value = "";
   saveAndRender();
-  pushCloudState("新增游戏已同步");
 }
 
 function renameCurrentGame() {
@@ -710,9 +749,9 @@ function renameCurrentGame() {
   const newName = renameGameInput.value.trim();
   if (!newName || newName === oldName || state.games.includes(newName)) return;
   state.games = state.games.map((game) => (game === oldName ? newName : game));
-  state.byGame[newName] = state.byGame[oldName] || createGameData();
+  state.byGame[newName] = state.byGame[oldName];
   delete state.byGame[oldName];
-  if (state.logos[oldName]) state.logos[newName] = state.logos[oldName];
+  state.logos[newName] = state.logos[oldName] || "";
   delete state.logos[oldName];
   state.autoUpdate[newName] = state.autoUpdate[oldName] || { sourceUrl: "", tempUrl: "", lastChecked: "", status: "" };
   delete state.autoUpdate[oldName];
@@ -722,13 +761,12 @@ function renameCurrentGame() {
   delete state.ignoredUpdates[oldName];
   state.game = newName;
   saveAndRender();
-  pushCloudState("游戏改名已同步");
 }
 
 function deleteCurrentGame() {
   if (state.games.length <= 1) return;
   const name = state.game;
-  if (!confirm(`确定删除「${name}」吗？这个游戏的卡池和图片引用也会从看板移除。`)) return;
+  if (!confirm(`确定删除“${name}”吗？`)) return;
   state.games = state.games.filter((game) => game !== name);
   delete state.byGame[name];
   delete state.logos[name];
@@ -737,7 +775,6 @@ function deleteCurrentGame() {
   delete state.ignoredUpdates[name];
   state.game = state.games[0];
   saveAndRender();
-  pushCloudState("删除游戏已同步");
 }
 
 function render() {
@@ -776,7 +813,7 @@ function renderGameBoard() {
       const subtitle = getBoardSubtitle(data);
       return `
         <button class="game-card ${game === state.game ? "active" : ""} ${
-          filled && endsInThreeDays(pool) ? "soon" : ""
+          filled && !pool.endTbd && endsInThreeDays(pool) ? "soon" : ""
         }" data-game="${escapeHtml(game)}" type="button">
           <span class="game-mark" data-logo-game="${escapeHtml(game)}">${renderLogoMarkup(game, logo)}</span>
           <span>
@@ -788,9 +825,7 @@ function renderGameBoard() {
       `;
     })
     .join("");
-
   hydrateGameLogos();
-
   gameBoard.querySelectorAll(".game-card").forEach((button) => {
     button.addEventListener("click", () => {
       state.game = button.dataset.game;
@@ -806,7 +841,7 @@ function getSortedGames() {
       return {
         game,
         index,
-        sortDays: isFilled(pool) ? getCountdownDays(pool) : Number.POSITIVE_INFINITY,
+        sortDays: isFilled(pool) && !pool.endTbd ? getCountdownDays(pool) : Number.POSITIVE_INFINITY,
       };
     })
     .sort((a, b) => a.sortDays - b.sortDays || a.index - b.index)
@@ -814,12 +849,19 @@ function getSortedGames() {
 }
 
 function getBoardSubtitle(data) {
-  const currentName = isFilled(data.current) ? data.current.name || "未命名卡池" : "";
-  const nextName = isFilled(data.next) ? data.next.name || "未命名卡池" : "";
+  const currentName = getPoolNames(getPhasePools(data, "current"));
+  const nextName = getPoolNames(getPhasePools(data, "next"));
   if (currentName && nextName) return `${currentName} → ${nextName}`;
   if (currentName) return currentName;
   if (nextName) return `待开启 → ${nextName}`;
   return "未录入";
+}
+
+function getPoolNames(pools) {
+  return pools
+    .filter(isFilled)
+    .map((pool) => pool.name || "未命名卡池")
+    .join(" / ");
 }
 
 function renderDetail() {
@@ -827,7 +869,6 @@ function renderDetail() {
   const data = state.byGame[game];
   const mainPool = getMainPool(game);
   const mainFilled = isFilled(mainPool);
-
   selectedGameTitle.textContent = game;
   renameGameInput.value = game;
   renderLogoDrop();
@@ -835,16 +876,38 @@ function renderDetail() {
   phaseLabel.textContent = mainFilled ? (mainPool.phase === "current" ? "当期 UP" : "下期 UP") : "当前游戏";
   eventTitle.textContent = mainFilled ? mainPool.name || "未命名卡池" : "等待卡池信息";
   mainCountdown.textContent = mainFilled ? formatCountdown(mainPool) : "--";
-  mainCountdown.classList.toggle("danger", mainFilled && endsInThreeDays(mainPool));
-  dateRange.textContent = mainFilled
-    ? `${formatDate(partsToDate(mainPool.start))} - ${formatDate(partsToDate(mainPool.end))}`
-    : "填写当期或下期 UP 后自动计算倒计时。";
-  heroImage.dataset.slot = mainPool.phase;
+  mainCountdown.classList.toggle("danger", mainFilled && !mainPool.endTbd && endsInThreeDays(mainPool));
+  dateRange.textContent = mainFilled ? formatRangeText(mainPool) : "填写当期或下期 UP 后自动计算倒计时。";
+  heroImage.dataset.phase = mainPool.phase || "current";
+  heroImage.dataset.poolIndex = "0";
   renderImage(heroImage, mainPool, "点击后直接粘贴图片");
-
   poolGrid.innerHTML = "";
   renderPendingUpdates();
-  phases.forEach(({ key, label }) => poolGrid.appendChild(createPoolCard(key, label, data[key])));
+  phases.forEach(({ key, label }) => {
+    const pools = getPhasePools(data, key);
+    const group = document.createElement("section");
+    group.className = "pool-phase-group";
+    group.innerHTML = `<div class="pool-phase-title"><h3>${label}</h3><button class="ghost-button" data-add-pool="${key}" type="button">新增卡池</button></div>`;
+    pools.forEach((pool, index) => group.appendChild(createPoolCard(key, label, pool, index)));
+    poolGrid.appendChild(group);
+  });
+  poolGrid.querySelectorAll("[data-add-pool]").forEach((button) => {
+    button.addEventListener("click", () => addPool(button.dataset.addPool));
+  });
+}
+
+function addPool(phase) {
+  state.byGame[state.game][`${phase}Extra`].push(createPool(phase));
+  saveAndRender();
+}
+
+function removePool(phase, index) {
+  if (Number(index) === 0) {
+    state.byGame[state.game][phase] = createPool(phase);
+  } else {
+    state.byGame[state.game][`${phase}Extra`].splice(Number(index) - 1, 1);
+  }
+  saveAndRender();
 }
 
 function saveAutoSource() {
@@ -857,367 +920,124 @@ function saveAutoSource() {
 
 async function checkCurrentGameUpdates() {
   saveAutoSource();
-  await checkGameUpdates(state.game, true);
 }
 
-async function checkAllSavedSources() {
-  for (const game of state.games) {
-    const url = state.autoUpdate[game]?.sourceUrl;
-    if (url) await checkGameUpdates(game, false);
-  }
-}
-
-async function checkGameUpdates(game, includeTemp) {
-  const config = state.autoUpdate[game];
-  const urls = [includeTemp ? config.tempUrl : "", config.sourceUrl].filter(Boolean);
-  if (!urls.length) {
-    config.status = "没有可检查的链接。";
-    saveAndRender();
-    return;
-  }
-
-  config.status = "正在检查...";
-  config.lastChecked = new Date().toISOString();
-  if (game === state.game) renderCloudPanel();
-
-  let foundCount = 0;
-  for (const url of urls) {
-    try {
-      const raw = await fetchArticleText(url);
-      const candidates = parseUpdateCandidates(raw, url);
-      candidates.forEach((candidate) => {
-        if (addPendingUpdate(game, candidate)) foundCount += 1;
-      });
-    } catch (error) {
-      config.status = `检查失败：${error.message || "链接读取失败"}`;
-    }
-  }
-
-  config.status = foundCount ? `发现 ${foundCount} 条待确认更新。` : config.status === "正在检查..." ? "没有发现新的可确认更新。" : config.status;
-  saveAndRender();
-}
-
-async function fetchArticleText(url) {
-  const clean = url.replace(/^https?:\/\//, "");
-  const candidates = [url, `https://r.jina.ai/http://${clean}`, `https://r.jina.ai/http://https://${clean}`];
-  let lastError = new Error("读取失败");
-  for (const candidate of candidates) {
-    try {
-      const response = await fetch(candidate);
-      if (!response.ok) throw new Error(`返回 ${response.status}`);
-      const text = await response.text();
-      if (text.trim().length < 80) throw new Error("内容太短");
-      return text;
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  throw lastError;
-}
-
-function parseUpdateCandidates(raw, sourceUrl) {
-  const text = cleanArticleText(raw);
-  const range = parseRangeText(text);
-  if (!range) return [];
-  const images = extractArticleImages(raw);
-  return [
-    {
-      id: stableUpdateId(sourceUrl, range.start, range.end),
-      name: inferUpdateName(text),
-      start: toDateParts(range.start),
-      end: toDateParts(range.end),
-      startText: formatInputDate(toDateParts(range.start)),
-      endText: formatInputDate(toDateParts(range.end)),
-      rangeText: `${formatDate(range.start)} - ${formatDate(range.end)}`,
-      image: images[0] || "",
-      sourceUrl,
-      createdAt: new Date().toISOString(),
-    },
-  ];
-}
-
-function addPendingUpdate(game, candidate) {
-  const ignored = state.ignoredUpdates[game] || [];
-  const pending = state.pendingUpdates[game] || [];
-  if (ignored.includes(candidate.id) || pending.some((item) => item.id === candidate.id)) return false;
-  state.pendingUpdates[game] = [candidate, ...pending].slice(0, 8);
-  return true;
-}
+async function checkAllSavedSources() {}
 
 function renderPendingUpdates() {
-  const pending = state.pendingUpdates[state.game] || [];
-  if (!pending.length) {
-    pendingPanel.innerHTML = "";
-    return;
-  }
-  pendingPanel.innerHTML = pending
-    .map(
-      (item) => `
-        <article class="pending-card" data-update-id="${escapeHtml(item.id)}">
-          ${item.image ? `<img src="${escapeHtml(item.image)}" alt="候选卡池图" />` : ""}
-          <div>
-            <p class="kicker">待确认更新</p>
-            <h3>${escapeHtml(item.name || "未命名卡池")}</h3>
-            <p>${escapeHtml(item.rangeText)}</p>
-            <p>${escapeHtml(item.sourceUrl)}</p>
-          </div>
-          <div class="pending-actions">
-            <button data-apply="current" type="button">应用到当期</button>
-            <button data-apply="next" type="button">应用到下期</button>
-            <button class="ghost-button" data-ignore="true" type="button">忽略</button>
-          </div>
-        </article>
-      `,
-    )
-    .join("");
-
-  pendingPanel.querySelectorAll("[data-apply]").forEach((button) => {
-    button.addEventListener("click", () => applyPendingUpdate(button.closest(".pending-card").dataset.updateId, button.dataset.apply));
-  });
-  pendingPanel.querySelectorAll("[data-ignore]").forEach((button) => {
-    button.addEventListener("click", () => ignorePendingUpdate(button.closest(".pending-card").dataset.updateId));
-  });
+  pendingPanel.innerHTML = "";
 }
 
-function applyPendingUpdate(id, phase) {
-  const pending = state.pendingUpdates[state.game] || [];
-  const item = pending.find((candidate) => candidate.id === id);
-  if (!item) return;
-  const pool = state.byGame[state.game][phase];
-  pool.name = item.name || pool.name;
-  pool.start = item.start;
-  pool.end = item.end;
-  pool.startText = item.startText;
-  pool.endText = item.endText;
-  pool.rangeText = item.rangeText;
-  if (item.image) {
-    pool.image = item.image;
-    pool.imageKey = "";
-  }
-  state.pendingUpdates[state.game] = pending.filter((candidate) => candidate.id !== id);
-  saveAndRender();
+function applyPendingUpdate() {}
+
+function ignorePendingUpdate() {}
+
+function getMainPool(game) {
+  const data = state.byGame[game];
+  const currentPools = getPhasePools(data, "current").filter(isFilled);
+  const timedCurrent = currentPools.filter((pool) => !pool.endTbd);
+  if (timedCurrent.length) return timedCurrent.sort((a, b) => partsToDate(a.end) - partsToDate(b.end))[0];
+  if (currentPools.length) return currentPools[0];
+  const nextPools = getPhasePools(data, "next").filter(isFilled);
+  const timedNext = nextPools.filter((pool) => !pool.endTbd);
+  if (timedNext.length) return timedNext.sort((a, b) => partsToDate(a.end) - partsToDate(b.end))[0];
+  return nextPools[0] || data.current;
 }
 
-function ignorePendingUpdate(id) {
-  state.pendingUpdates[state.game] = (state.pendingUpdates[state.game] || []).filter((candidate) => candidate.id !== id);
-  state.ignoredUpdates[state.game] = [...(state.ignoredUpdates[state.game] || []), id].slice(-80);
-  saveAndRender();
-}
-
-function cleanArticleText(raw) {
-  return String(raw || "")
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function inferUpdateName(text) {
-  const quoted = [...text.matchAll(/[「『《【“]([^」』》】”]{2,24})[」』》】”]/g)].map((match) => match[1]);
-  return quoted.at(-1) || "自动识别卡池";
-}
-
-function extractArticleImages(raw) {
-  const urls = new Set();
-  const patterns = [
-    /<img[^>]+(?:data-src|src)=["']([^"']+)["']/gi,
-    /!\[[^\]]*]\((https?:\/\/[^)]+)\)/g,
-    /(?:cdn_url|msg_cdn_url|cover|url)["']?\s*[:=]\s*["'](https?:\\?\/\\?\/[^"'\\]+)["']/gi,
-  ];
-  patterns.forEach((pattern) => {
-    let match;
-    while ((match = pattern.exec(raw))) {
-      const url = match[1].replace(/\\\//g, "/").replace(/^\/\//, "https://");
-      if (/^https?:\/\//.test(url) && !/\.(svg|gif)$/i.test(url)) urls.add(url);
-    }
-  });
-  return [...urls].slice(0, 6);
-}
-
-function stableUpdateId(sourceUrl, start, end) {
-  return `${sourceUrl}|${start.getTime()}|${end.getTime()}`;
-}
-
-function createPoolCard(phase, label, pool) {
+function createPoolCard(phase, label, pool, index) {
   const node = poolTemplate.content.firstElementChild.cloneNode(true);
   node.dataset.phase = phase;
-  node.querySelector('[data-role="phase"]').textContent = label;
+  node.dataset.poolIndex = String(index);
+  node.querySelector('[data-role="phase"]').textContent = `${label}${index ? ` #${index + 1}` : ""}`;
   node.querySelector('[data-role="title"]').textContent = pool.name || "未命名卡池";
 
   const imageButton = node.querySelector('[data-role="image"]');
-  imageButton.dataset.slot = phase;
+  imageButton.dataset.phase = phase;
+  imageButton.dataset.poolIndex = String(index);
   renderImage(imageButton, pool, `点击后 Ctrl+V 粘贴${label}图片`);
 
   const nameInput = node.querySelector('[data-field="name"]');
   nameInput.value = pool.name || "";
   nameInput.addEventListener("input", () => {
     pool.name = nameInput.value;
-    saveStateOnly();
     node.querySelector('[data-role="title"]').textContent = pool.name || "未命名卡池";
+    saveStateOnly();
   });
+  nameInput.addEventListener("change", saveAndRender);
 
-  const startInput = node.querySelector('[data-field="startText"]');
-  const endInput = node.querySelector('[data-field="endText"]');
-  const rangePreview = node.querySelector('[data-role="rangePreview"]');
-  startInput.value = pool.startText || "";
-  endInput.value = pool.endText || "";
-  rangePreview.textContent = formatRangeText(pool);
-  bindTimeInput(startInput, pool, "start");
-  bindTimeInput(endInput, pool, "end");
+  const timeGrid = node.querySelector(".time-input-grid");
+  timeGrid.innerHTML = "";
+  timeGrid.appendChild(createDateEditor(pool, "start", "开始时间"));
+  timeGrid.appendChild(createDateEditor(pool, "end", "结束时间"));
 
-  node.querySelector('[data-action="clear"]').addEventListener("click", () => {
-    if (state.byGame[state.game][phase].imageKey) imageDbDelete(state.byGame[state.game][phase].imageKey);
-    state.byGame[state.game][phase] = createPool(phase);
-    saveAndRender();
-  });
+  const preview = node.querySelector('[data-role="rangePreview"]');
+  preview.textContent = formatRangeText(pool);
 
+  node.querySelector('[data-action="clear"]').textContent = index ? "删除" : "清空";
+  node.querySelector('[data-action="clear"]').addEventListener("click", () => removePool(phase, index));
   return node;
 }
 
-function bindTimeInput(input, pool, key) {
-  input.addEventListener("input", () => {
-    pool[`${key}Text`] = input.value;
-    saveStateOnly();
+function createDateEditor(pool, key, label) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "date-parts";
+  const tbdKey = `${key}Tbd`;
+  wrapper.innerHTML = `
+    <div class="date-parts-head">
+      <span>${label}</span>
+      <label class="tbd-toggle"><input type="checkbox" ${pool[tbdKey] ? "checked" : ""} /> 待定</label>
+    </div>
+    <div class="date-part-grid">
+      ${createNumberInput("year", pool[key].year, 2024, 2035, "年")}
+      ${createNumberInput("month", pool[key].month, 1, 12, "月")}
+      ${createNumberInput("day", pool[key].day, 1, 31, "日")}
+      ${createNumberInput("hour", pool[key].hour, 0, 23, "时")}
+    </div>
+  `;
+  const checkbox = wrapper.querySelector('input[type="checkbox"]');
+  const inputs = [...wrapper.querySelectorAll('input[type="number"]')];
+  const syncDisabled = () => {
+    inputs.forEach((input) => {
+      input.disabled = checkbox.checked;
+    });
+  };
+  checkbox.addEventListener("change", () => {
+    pool[tbdKey] = checkbox.checked;
+    syncDisabled();
+    saveAndRender();
   });
-  input.addEventListener("change", () => commitSingleTime(pool, key, input.value));
-  input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      input.blur();
-    }
+  inputs.forEach((input) => {
+    input.addEventListener("change", () => {
+      const part = input.dataset.part;
+      const min = Number(input.min);
+      const max = Number(input.max);
+      const value = Math.min(max, Math.max(min, Number(input.value || min)));
+      input.value = value;
+      pool[key][part] = value;
+      if (part === "year" || part === "month") {
+        pool[key].day = Math.min(pool[key].day, daysInMonth(pool[key].year, pool[key].month));
+      }
+      pool[key].minute = 0;
+      pool[`${key}Text`] = formatInputDate(pool[key]);
+      pool.rangeText = formatRangeText(pool);
+      saveAndRender();
+    });
   });
+  syncDisabled();
+  return wrapper;
 }
 
-function commitSingleTime(pool, key, value) {
-  pool[`${key}Text`] = value.trim();
-  const parsed = parseSingleTimeText(value, key === "end");
-  if (!parsed) {
-    saveStateOnly();
-    return;
-  }
-
-  pool[key] = toDateParts(parsed);
-  const start = partsToDate(pool.start);
-  const end = partsToDate(pool.end);
-  if (end < start) end.setFullYear(end.getFullYear() + 1);
-  pool.end = toDateParts(end);
-  pool.rangeText = formatRangeText(pool);
-  saveAndRender();
-}
-
-function applyRangeText(pool, value) {
-  pool.rangeText = value.trim();
-  const parsed = parseRangeText(pool.rangeText);
-  if (!parsed) return;
-  pool.start = toDateParts(parsed.start);
-  pool.end = toDateParts(parsed.end);
-  pool.rangeText = formatRangeText(pool);
-}
-
-function parseRangeText(value) {
-  const normalized = normalizeRangeInput(value);
-  const natural = parseNaturalRange(normalized);
-  if (natural) return natural;
-
-  const match = normalized.match(/(.+?)\s*-\s*(.+)/);
-  if (!match) return null;
-  const fallbackYear = new Date().getFullYear();
-  const start = parseDatePhrase(match[1], fallbackYear);
-  const end = parseDatePhrase(match[2], start ? start.getFullYear() : fallbackYear, true);
-  if (!start || !end) return null;
-  if (end < start) end.setFullYear(end.getFullYear() + 1);
-  return { start, end };
-}
-
-function parseSingleTimeText(value, defaultEndOfDay = false) {
-  const normalized = normalizeRangeInput(value);
-  return parseDatePhrase(normalized, new Date().getFullYear(), defaultEndOfDay);
-}
-
-function normalizeRangeInput(value) {
-  return String(value || "")
-    .replace(/[（(]\s*[^）)]*服务器时间\s*[）)]/g, "")
-    .replace(/\s*(至|到)\s*/g, " - ")
-    .replace(/[－﹣−–—~～]/g, "-")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function parseNaturalRange(value) {
-  const pieces = [...value.matchAll(/(?:(20\d{2})年)?(\d{1,2})月(\d{1,2})日?([^，。,；;]*)/g)].map((match) => ({
-    year: match[1],
-    month: match[2],
-    day: match[3],
-    tail: match[4] || "",
-    index: match.index,
-  }));
-  if (pieces.length < 2) return null;
-
-  const startPiece =
-    pieces.find((piece) => /开启|开始|上线|开放|启动/.test(piece.tail) || /开启|开始|上线|开放|启动/.test(value.slice(piece.index, piece.index + 40))) ||
-    pieces[0];
-  const endPiece =
-    pieces.find((piece) => piece !== startPiece && (/结束|截止|关闭|下架/.test(piece.tail) || /结束|截止|关闭|下架/.test(value.slice(piece.index, piece.index + 40)))) ||
-    pieces.find((piece) => piece !== startPiece) ||
-    pieces[1];
-
-  const fallbackYear = Number(startPiece.year || new Date().getFullYear());
-  const start = dateFromNaturalPiece(startPiece, fallbackYear, false);
-  const end = dateFromNaturalPiece(endPiece, start.getFullYear(), true);
-  if (end < start) end.setFullYear(end.getFullYear() + 1);
-  return { start, end };
-}
-
-function dateFromNaturalPiece(piece, fallbackYear, defaultEndOfDay) {
-  const time = parseChineseTime(piece.tail, defaultEndOfDay);
-  return new Date(Number(piece.year || fallbackYear), Number(piece.month) - 1, Number(piece.day), time.hour, time.minute);
-}
-
-function parseChineseTime(text, defaultEndOfDay) {
-  const compact = String(text || "").replace(/\s+/g, "");
-  const colon = compact.match(/(上午|早上|中午|下午|晚上|晚间|凌晨)?(\d{1,2})[:：](\d{1,2})/);
-  if (colon) return normalizeHour(colon[2], colon[3], colon[1]);
-
-  const chinese = compact.match(/(上午|早上|中午|下午|晚上|晚间|凌晨)?(\d{1,2})点(?:半|(\d{1,2})分?)?/);
-  if (chinese) return normalizeHour(chinese[2], chinese[3] || (compact.includes("半") ? 30 : 0), chinese[1]);
-
-  return { hour: defaultEndOfDay ? 23 : 0, minute: defaultEndOfDay ? 59 : 0 };
-}
-
-function normalizeHour(hourValue, minuteValue, period = "") {
-  let hour = Number(hourValue);
-  const minute = Number(minuteValue || 0);
-  if (/下午|晚上|晚间/.test(period) && hour < 12) hour += 12;
-  if (/中午/.test(period) && hour < 11) hour += 12;
-  if (/凌晨/.test(period) && hour === 12) hour = 0;
-  return { hour, minute };
-}
-
-function parseDatePhrase(phrase, fallbackYear, defaultEndOfDay = false) {
-  const clean = String(phrase || "").replace(/\s+/g, "").replace(/：/g, ":");
-  const match = clean.match(/(?:(20\d{2})[年./-])?(\d{1,2})(?:月|[./-])(\d{1,2})日?(.*)?/);
-  if (!match) return null;
-  const time = parseChineseTime(match[4] || "", defaultEndOfDay);
-  return new Date(
-    Number(match[1] || fallbackYear),
-    Number(match[2]) - 1,
-    Number(match[3]),
-    time.hour,
-    time.minute,
-  );
-}
-
-function getMainPool(game) {
-  const data = state.byGame[game];
-  if (isActive(data.current) || isFilled(data.current)) return data.current;
-  if (isFilled(data.next)) return data.next;
-  return data.current;
+function createNumberInput(part, value, min, max, suffix) {
+  return `
+    <label>
+      <input data-part="${part}" type="number" min="${min}" max="${max}" step="1" value="${value}" inputmode="numeric" />
+      <span>${suffix}</span>
+    </label>
+  `;
 }
 
 function isActive(pool) {
+  if (pool.startTbd || pool.endTbd) return false;
   const now = Date.now();
   return partsToDate(pool.start).getTime() <= now && now <= partsToDate(pool.end).getTime();
 }
@@ -1240,11 +1060,13 @@ function handlePaste(event) {
         saveAndRender();
         return;
       }
-      const slot = target.dataset.slot || "current";
-      const imageKey = makeImageKey(state.game, slot);
+      const phase = target.dataset.phase || target.dataset.slot || "current";
+      const poolIndex = target.dataset.poolIndex || "0";
+      const pool = getPoolRef(state.game, phase, poolIndex);
+      const imageKey = makeImageKey(state.game, `${phase}:${poolIndex}`);
       await imageDbSet(imageKey, reader.result);
-      state.byGame[state.game][slot].imageKey = imageKey;
-      state.byGame[state.game][slot].image = "";
+      pool.imageKey = imageKey;
+      pool.image = "";
       saveAndRender();
     } catch {
       alert("图片存储暂时不可用。请用 http://127.0.0.1:8787 打开页面，或刷新后再试。");
@@ -1329,6 +1151,7 @@ function makeLogoKey(game) {
 }
 
 function formatCountdown(pool) {
+  if (pool.endTbd) return "待定";
   const days = getCountdownDays(pool);
   if (days > 0) return `${days}天`;
   if (days === 0) return "今天";
@@ -1336,14 +1159,16 @@ function formatCountdown(pool) {
 }
 
 function getCountdownDays(pool) {
+  if (pool.endTbd) return Number.POSITIVE_INFINITY;
   const now = Date.now();
-  const start = partsToDate(pool.start).getTime();
+  const start = pool.startTbd ? now : partsToDate(pool.start).getTime();
   const end = partsToDate(pool.end).getTime();
   const target = now < start ? start : end;
   return Math.ceil((target - now) / 86400000);
 }
 
 function endsInThreeDays(pool) {
+  if (pool.endTbd) return false;
   const days = Math.ceil((partsToDate(pool.end).getTime() - Date.now()) / 86400000);
   return days >= 0 && days <= 3;
 }
@@ -1359,7 +1184,7 @@ function toDateParts(date) {
 }
 
 function partsToDate(parts) {
-  return new Date(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute);
+  return new Date(parts.year, parts.month - 1, parts.day, parts.hour || 0, parts.minute || 0);
 }
 
 function daysInMonth(year, month) {
@@ -1376,7 +1201,9 @@ function formatDate(date) {
 }
 
 function formatRangeText(pool) {
-  return `${formatDate(partsToDate(pool.start))} - ${formatDate(partsToDate(pool.end))}`;
+  const start = pool.startTbd ? "开始待定" : formatDate(partsToDate(pool.start));
+  const end = pool.endTbd ? "结束待定" : formatDate(partsToDate(pool.end));
+  return `${start} - ${end}`;
 }
 
 function formatInputDate(parts) {
