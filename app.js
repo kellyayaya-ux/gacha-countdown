@@ -826,19 +826,20 @@ function renderGameBoard() {
     .map((game) => {
       const data = state.byGame[game];
       const pool = getMainPool(game);
-      const filled = isFilled(pool);
+      const countdownPool = getCountdownTargetPool(game);
+      const filled = isFilled(countdownPool);
       const logo = getGameLogo(game);
       const subtitle = getBoardSubtitle(data);
       return `
         <button class="game-card ${game === state.game ? "active" : ""} ${
-          filled && !pool.endTbd && endsInThreeDays(pool) ? "soon" : ""
+          filled && endsInThreeDays(countdownPool) ? "soon" : ""
         }" data-game="${escapeHtml(game)}" type="button">
           <span class="game-mark" data-logo-game="${escapeHtml(game)}">${renderLogoMarkup(game, logo)}</span>
           <span>
             <strong>${escapeHtml(game)}</strong>
             <p>${escapeHtml(subtitle)}</p>
           </span>
-          <span class="game-days">${filled ? formatCountdown(pool) : "--"}</span>
+          <span class="game-days">${filled ? formatCountdown(countdownPool) : "--"}</span>
         </button>
       `;
     })
@@ -855,11 +856,11 @@ function renderGameBoard() {
 function getSortedGames() {
   return games
     .map((game, index) => {
-      const pool = getMainPool(game);
+      const pool = getCountdownTargetPool(game);
       return {
         game,
         index,
-        sortDays: isFilled(pool) && !pool.endTbd ? getCountdownDays(pool) : Number.POSITIVE_INFINITY,
+        sortDays: isFilled(pool) ? getCountdownDays(pool) : Number.POSITIVE_INFINITY,
       };
     })
     .sort((a, b) => a.sortDays - b.sortDays || a.index - b.index)
@@ -886,6 +887,7 @@ function renderDetail() {
   const game = state.game;
   const data = state.byGame[game];
   const mainPool = getMainPool(game);
+  const countdownPool = getCountdownTargetPool(game);
   const mainFilled = isFilled(mainPool);
   selectedGameTitle.textContent = game;
   renameGameInput.value = game;
@@ -893,8 +895,8 @@ function renderDetail() {
   renderCloudPanel();
   phaseLabel.textContent = mainFilled ? (mainPool.phase === "current" ? "当期 UP" : "下期 UP") : "当前游戏";
   eventTitle.textContent = mainFilled ? mainPool.name || "未命名卡池" : "等待卡池信息";
-  mainCountdown.textContent = mainFilled ? formatCountdown(mainPool) : "--";
-  mainCountdown.classList.toggle("danger", mainFilled && !mainPool.endTbd && endsInThreeDays(mainPool));
+  mainCountdown.textContent = isFilled(countdownPool) ? formatCountdown(countdownPool) : "--";
+  mainCountdown.classList.toggle("danger", isFilled(countdownPool) && endsInThreeDays(countdownPool));
   dateRange.textContent = mainFilled ? formatRangeText(mainPool) : "填写当期或下期 UP 后自动计算倒计时。";
   heroImage.dataset.phase = mainPool.phase || "current";
   heroImage.dataset.poolIndex = "0";
@@ -960,6 +962,17 @@ function getMainPool(game) {
   const timedNext = nextPools.filter((pool) => !pool.endTbd);
   if (timedNext.length) return timedNext.sort((a, b) => partsToDate(a.end) - partsToDate(b.end))[0];
   return nextPools[0] || data.current;
+}
+
+function getCountdownTargetPool(game) {
+  const data = state.byGame[game];
+  const now = Date.now();
+  const nextPools = getPhasePools(data, "next")
+    .filter((pool) => isFilled(pool) && !pool.startTbd)
+    .filter((pool) => partsToDate(pool.start).getTime() >= now)
+    .sort((a, b) => partsToDate(a.start) - partsToDate(b.start));
+  if (nextPools.length) return nextPools[0];
+  return getMainPool(game);
 }
 
 function createPoolCard(phase, label, pool, index) {
@@ -1169,7 +1182,7 @@ function makeLogoKey(game) {
 }
 
 function formatCountdown(pool) {
-  if (pool.endTbd) return "待定";
+  if (pool.phase !== "next" && pool.endTbd) return "待定";
   const days = getCountdownDays(pool);
   if (days > 0) return `${days}天`;
   if (days === 0) return "今天";
@@ -1177,17 +1190,17 @@ function formatCountdown(pool) {
 }
 
 function getCountdownDays(pool) {
-  if (pool.endTbd) return Number.POSITIVE_INFINITY;
+  if (pool.phase !== "next" && pool.endTbd) return Number.POSITIVE_INFINITY;
   const now = Date.now();
   const start = pool.startTbd ? now : partsToDate(pool.start).getTime();
-  const end = partsToDate(pool.end).getTime();
+  const end = pool.endTbd ? start : partsToDate(pool.end).getTime();
   const target = now < start ? start : end;
   return Math.ceil((target - now) / 86400000);
 }
 
 function endsInThreeDays(pool) {
-  if (pool.endTbd) return false;
-  const days = Math.ceil((partsToDate(pool.end).getTime() - Date.now()) / 86400000);
+  if (!pool || (pool.phase !== "next" && pool.endTbd)) return false;
+  const days = getCountdownDays(pool);
   return days >= 0 && days <= 3;
 }
 
