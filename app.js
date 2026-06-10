@@ -448,7 +448,7 @@ async function pushCloudState(message = "已同步") {
     if (!gunNode) return;
   }
   try {
-    const snapshot = await createCloudSnapshot();
+    const snapshot = createCloudSyncSnapshot();
     const updatedAt = new Date().toISOString();
     lastCloudUpdatedAt = updatedAt;
     gunNode.get("state").put(
@@ -511,6 +511,21 @@ async function createCloudSnapshot() {
     const logo = snapshot.logos[game];
     if (logo && !logo.startsWith("data:") && !logo.startsWith("assets/")) snapshot.logos[game] = await imageDbGet(logo).catch(() => logo);
   }
+  return snapshot;
+}
+
+function createCloudSyncSnapshot() {
+  const snapshot = createStorageSnapshot();
+  snapshot.games.forEach((game) => {
+    phases.forEach(({ key }) => {
+      const pool = snapshot.byGame[game]?.[key];
+      if (!pool) return;
+      pool.image = "";
+      pool.imageKey = "";
+    });
+    const logo = snapshot.logos[game];
+    if (logo && !logo.startsWith("assets/")) snapshot.logos[game] = defaultLogos[game] || "";
+  });
   return snapshot;
 }
 
