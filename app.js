@@ -53,6 +53,9 @@ const createRoomButton = document.querySelector("#createRoomButton");
 const connectCloudButton = document.querySelector("#connectCloudButton");
 const pushCloudButton = document.querySelector("#pushCloudButton");
 const copyShareButton = document.querySelector("#copyShareButton");
+const exportDataButton = document.querySelector("#exportDataButton");
+const importDataButton = document.querySelector("#importDataButton");
+const importDataFile = document.querySelector("#importDataFile");
 const cloudStatus = document.querySelector("#cloudStatus");
 const autoSourceUrl = document.querySelector("#autoSourceUrl");
 const tempArticleUrl = document.querySelector("#tempArticleUrl");
@@ -94,6 +97,9 @@ createRoomButton.addEventListener("click", createSharedRoom);
 connectCloudButton.addEventListener("click", connectCloudFromInputs);
 pushCloudButton.addEventListener("click", () => pushCloudState("手动上传完成"));
 copyShareButton.addEventListener("click", copyShareUrl);
+exportDataButton?.addEventListener("click", exportMigrationPack);
+importDataButton?.addEventListener("click", () => importDataFile?.click());
+importDataFile?.addEventListener("change", importMigrationPack);
 saveSourceButton.addEventListener("click", saveAutoSource);
 checkUpdateButton.addEventListener("click", checkCurrentGameUpdates);
 
@@ -506,6 +512,55 @@ async function createCloudSnapshot() {
     if (logo && !logo.startsWith("data:") && !logo.startsWith("assets/")) snapshot.logos[game] = await imageDbGet(logo).catch(() => logo);
   }
   return snapshot;
+}
+
+async function exportMigrationPack() {
+  try {
+    setCloudStatus("正在打包迁移包...");
+    const data = await createCloudSnapshot();
+    const pack = {
+      type: "gacha-countdown-migration",
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      data,
+    };
+    const blob = new Blob([JSON.stringify(pack)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `gacha-countdown-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    setCloudStatus("迁移包已下载。到在线版点“导入迁移包”即可。");
+  } catch (error) {
+    setCloudStatus(`导出失败：${error.message || "图片读取失败"}`);
+  }
+}
+
+function importMigrationPack(event) {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const parsed = JSON.parse(reader.result);
+      const data = parsed?.data || parsed;
+      if (!data?.byGame || !Array.isArray(data.games)) throw new Error("文件不是卡池迁移包");
+      applyRemoteState(data);
+      setCloudStatus("迁移包已导入，图片正在写入本机。");
+    } catch (error) {
+      setCloudStatus(`导入失败：${error.message || "文件读取失败"}`);
+    } finally {
+      event.target.value = "";
+    }
+  };
+  reader.onerror = () => {
+    setCloudStatus("导入失败：文件读取失败。");
+    event.target.value = "";
+  };
+  reader.readAsText(file);
 }
 
 function applyRemoteState(remoteData) {
