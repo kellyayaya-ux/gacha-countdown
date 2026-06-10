@@ -209,10 +209,18 @@ function loadState() {
   const merged = loaded.slice(1).reduce((result, legacy) => mergeState(result, legacy), loaded[0]);
   if (loaded.length > 1) {
     try {
-      localStorage.setItem(storageKey, JSON.stringify(merged));
+      localStorage.setItem(storageKey, JSON.stringify(createStorageSnapshot(merged)));
     } catch {}
   }
   return merged;
+}
+
+function cleanupLegacyStorage() {
+  legacyStorageKeys.forEach((key) => {
+    try {
+      localStorage.removeItem(key);
+    } catch {}
+  });
 }
 
 function readSavedState(key) {
@@ -340,14 +348,33 @@ function saveStateOnly() {
 
 function persistState() {
   try {
-    localStorage.setItem(storageKey, JSON.stringify(state));
+    localStorage.setItem(storageKey, JSON.stringify(createStorageSnapshot()));
+    cleanupLegacyStorage();
     scheduleCloudPush();
   } catch (error) {
-    alert("保存失败：浏览器本地存储空间不足。请刷新页面完成图片迁移后再试。");
+    try {
+      cleanupLegacyStorage();
+      localStorage.setItem(storageKey, JSON.stringify(createStorageSnapshot(state, true)));
+      scheduleCloudPush();
+      return;
+    } catch {}
+    alert("保存失败：浏览器本地存储空间不足。请先刷新页面一次，再点“上传本机数据”。");
     throw error;
   }
 }
 
+function createStorageSnapshot(source = state, stripInlineImages = false) {
+  const snapshot = JSON.parse(JSON.stringify(source));
+  snapshot.games.forEach((game) => {
+    phases.forEach(({ key }) => {
+      const pool = snapshot.byGame[game]?.[key];
+      if (!pool) return;
+      if (pool.imageKey || stripInlineImages) pool.image = "";
+    });
+    if (stripInlineImages && snapshot.logos[game]?.startsWith("data:")) snapshot.logos[game] = "";
+  });
+  return snapshot;
+}
 function loadCloudConfig() {
   try {
     cloudConfig = { ...cloudConfig, ...(JSON.parse(localStorage.getItem(cloudConfigKey)) || {}) };
