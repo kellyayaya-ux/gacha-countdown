@@ -374,8 +374,8 @@ button {
 
 .time-input-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  grid-template-columns: 1fr;
+  gap: 12px;
 }
 
 .date-parts {
@@ -402,8 +402,9 @@ button {
 
 .date-part-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 6px;
+  grid-template-columns: 96px 74px 74px 74px;
+  gap: 10px;
+  align-items: end;
 }
 
 .date-part-grid label {
@@ -416,8 +417,10 @@ button {
 .date-part-grid input[type="number"] {
   width: 100%;
   min-width: 0;
-  padding: 9px 6px;
+  padding: 10px 8px;
   text-align: center;
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
 }
 
 .range-preview {
@@ -583,6 +586,10 @@ button {
 
   .time-input-grid {
     grid-template-columns: 1fr;
+  }
+
+  .date-part-grid {
+    grid-template-columns: 1.35fr 1fr 1fr 1fr;
   }
 
 }
