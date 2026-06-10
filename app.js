@@ -403,7 +403,12 @@ function loadCloudConfig() {
     cloudConfig = { ...cloudConfig, ...(JSON.parse(localStorage.getItem(cloudConfigKey)) || {}) };
   } catch {}
   const urlRoom = new URLSearchParams(window.location.search).get("room");
-  if (urlRoom) cloudConfig.roomId = urlRoom;
+  if (urlRoom) {
+    cloudConfig.roomId = urlRoom;
+    localStorage.setItem(cloudConfigKey, JSON.stringify(cloudConfig));
+  } else if (cloudConfig.roomId) {
+    ensureRoomUrl(cloudConfig.roomId);
+  }
   roomId.value = cloudConfig.roomId || "";
   shareLink.value = cloudConfig.roomId ? buildShareUrl(cloudConfig.roomId) : "";
 }
@@ -502,6 +507,7 @@ async function createSharedRoom() {
     roomId.value = id;
     saveCloudConfig();
     shareLink.value = buildShareUrl(id);
+    ensureRoomUrl(id);
     const client = getSupabaseClient();
     const { error } = await client.from("gacha_rooms").upsert({
       id,
@@ -523,6 +529,11 @@ function copyShareUrl() {
   if (!value) return;
   navigator.clipboard?.writeText(value);
   setCloudStatus("分享链接已复制。");
+}
+
+function ensureRoomUrl(id) {
+  const target = buildShareUrl(id);
+  if (window.location.href !== target) window.history.replaceState({}, "", target);
 }
 function buildShareUrl(id) {
   const base = window.location.href.split("?")[0];
