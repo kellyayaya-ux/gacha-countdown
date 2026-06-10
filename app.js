@@ -445,11 +445,10 @@ async function connectCloud() {
     setCloudStatus("正在连接云端房间...");
     const { data, error } = await client.from("gacha_rooms").select("data, updated_at").eq("id", cloudConfig.roomId).maybeSingle();
     if (error) throw error;
-    if (data?.data?.games) {
+    if (isValidRemoteState(data?.data)) {
       lastCloudUpdatedAt = data.updated_at || "";
-      applyRemoteState(data.data);
-    } else {
-      await pushCloudState("共享房间已创建，复制链接发给朋友即可");
+      applyRemoteState(data.data);    } else {
+      setCloudStatus("这是一个空看板。整理好本机数据后，再点上传本机数据。");
     }
     clearInterval(cloudPullTimer);
     cloudPullTimer = setInterval(pullCloudState, 5000);
@@ -466,7 +465,7 @@ async function pullCloudState() {
     const client = getSupabaseClient();
     const { data, error } = await client.from("gacha_rooms").select("data, updated_at").eq("id", cloudConfig.roomId).maybeSingle();
     if (error) throw error;
-    if (!data?.data || data.updated_at === lastCloudUpdatedAt) return;
+    if (!isValidRemoteState(data?.data) || data.updated_at === lastCloudUpdatedAt) return;
     lastCloudUpdatedAt = data.updated_at || "";
     applyRemoteState(data.data);
   } catch (error) {
@@ -529,6 +528,10 @@ function copyShareUrl() {
   if (!value) return;
   navigator.clipboard?.writeText(value);
   setCloudStatus("分享链接已复制。");
+}
+
+function isValidRemoteState(data) {
+  return Boolean(data && Array.isArray(data.games) && data.games.length && data.byGame);
 }
 
 function ensureRoomUrl(id) {
@@ -678,6 +681,10 @@ function importMigrationPack(event) {
 }
 
 function applyRemoteState(remoteData) {
+  if (!isValidRemoteState(remoteData)) {
+    setCloudStatus("云端房间还是空的，没有覆盖本机数据。");
+    return;
+  }
   applyingRemoteState = true;
   const selected = state.game;
   const normalized = normalizeState(remoteData);
